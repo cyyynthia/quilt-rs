@@ -434,11 +434,53 @@ fn reverse_applies(state: &State, entry: &PatchEntry) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Undo `patch` in the working tree from its backups and discard them, as
+/// quilt does when a patch is popped, deleted or fails to push.
 pub(crate) fn restore_patch(state: &State, patch: &str, verbose: bool) -> Result<()> {
     let files = state.tracked_files(patch)?;
-    restore_patch_files(state, patch, &files, verbose)
+    unapply_patch_files(state, patch, &files, verbose)
 }
 
+/// Restore `files` from `patch`'s backups, moving rather than copying them,
+/// then remove the backups and the recorded expected state.
+pub(crate) fn unapply_patch_files(
+    state: &State,
+    patch: &str,
+    files: &[PathBuf],
+    verbose: bool,
+) -> Result<()> {
+    for file in files {
+        restore_file(state, patch, file, verbose, true)?;
+    }
+    discard_patch_backups(state, patch)
+}
+
+/// Remove `.pc/<patch>` and q's metadata for it.
+pub(crate) fn discard_patch_backups(state: &State, patch: &str) -> Result<()> {
+    let meta_root = state.pc_dir.join(".q");
+    for (dir, root) in [
+        (state.backup_dir(patch), &state.pc_dir),
+        (meta_dir(state, patch), &meta_root),
+    ] {
+        match fs::remove_dir_all(&dir) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                return Err(err).with_context(|| format!("failed to remove {}", dir.display()));
+            }
+            _ => {}
+        }
+        // Patch names like `debian/foo.patch` leave `.pc/debian/` behind.
+        let mut parent = dir.parent();
+        while let Some(p) = parent.filter(|p| p.starts_with(root) && p != root) {
+            if fs::remove_dir(p).is_err() {
+                break;
+            }
+            parent = p.parent();
+        }
+    }
+    Ok(())
+}
+
+/// Restore `files` from `patch`'s backups, keeping the backups.
 pub(crate) fn restore_patch_files(
     state: &State,
     patch: &str,
@@ -446,22 +488,42 @@ pub(crate) fn restore_patch_files(
     verbose: bool,
 ) -> Result<()> {
     for file in files {
-        let backup = state.backup_dir(patch).join(file);
-        let dest = state.root.join(file);
-        create_parent_dir(&dest)?;
-        if backup.metadata()?.len() == 0 {
-            if verbose {
-                println!("Removing {}", file.display());
-            }
-            let _ = fs::remove_file(&dest);
-        } else {
-            if verbose {
-                println!("Restoring {}", file.display());
-            }
-            copy_keeping_hard_links(&backup, &dest)?;
-        }
+        restore_file(state, patch, file, verbose, false)?;
     }
     Ok(())
+}
+
+/// Put `file` back the way `patch`'s backup has it. With `consume`, the
+/// backup is moved into place (it is about to be discarded anyway) and the
+/// file's mtime is set to now, like `quilt pop` does with `backup-files -t`.
+fn restore_file(
+    state: &State,
+    patch: &str,
+    file: &Path,
+    verbose: bool,
+    consume: bool,
+) -> Result<()> {
+    let backup = state.backup_dir(patch).join(file);
+    let dest = state.root.join(file);
+    create_parent_dir(&dest)?;
+    let metadata = backup.metadata()?;
+    if metadata.len() == 0 {
+        if verbose {
+            println!("Removing {}", file.display());
+        }
+        let _ = fs::remove_file(&dest);
+        return Ok(());
+    }
+    if verbose {
+        println!("Restoring {}", file.display());
+    }
+    if consume && fs::rename(&backup, &dest).is_ok() {
+        if !has_other_hard_links(&metadata) {
+            filetime::set_file_mtime(&dest, filetime::FileTime::now())?;
+        }
+        return Ok(());
+    }
+    copy_keeping_hard_links(&backup, &dest)
 }
 
 /// A scratch tree with `entry` applied to copies of its backups of
@@ -517,7 +579,7 @@ pub(crate) fn patch_removes_cleanly(
     tracked: &[PathBuf],
 ) -> Result<bool> {
     let patch = &entry.name;
-    if expected_state_is_current(state, patch) {
+    if expected_state_is_current_for(state, patch, tracked) {
         if use_expected_state {
             return expected_state_matches(state, patch, tracked);
         }

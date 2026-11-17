@@ -921,3 +921,147 @@ fn diff_z_ignores_expected_state_recorded_for_other_patch_text() {
         .failure()
         .stderr(predicate::str::contains("does not remove cleanly"));
 }
+
+/// One patch changing `hello.txt` from "old" to "new", refreshed and applied.
+fn applied_hello_patch() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("hello.txt"), "old\n").unwrap();
+    q(dir.path())
+        .args(["new", "change.diff"])
+        .assert()
+        .success();
+    q(dir.path()).args(["add", "hello.txt"]).assert().success();
+    fs::write(dir.path().join("hello.txt"), "new\n").unwrap();
+    q(dir.path()).args(["refresh"]).assert().success();
+    dir
+}
+
+#[test]
+fn pop_notices_same_size_edits_made_right_after_recording() {
+    // Right after refresh and after push: an edit within the same timestamp
+    // tick that keeps the size must not pass for the recorded state.
+    let dir = applied_hello_patch();
+    fs::write(dir.path().join("hello.txt"), "NEW\n").unwrap();
+    q(dir.path())
+        .args(["pop"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not remove cleanly"));
+
+    fs::write(dir.path().join("hello.txt"), "new\n").unwrap();
+    q(dir.path()).args(["pop"]).assert().success();
+    q(dir.path()).args(["push"]).assert().success();
+    fs::write(dir.path().join("hello.txt"), "NEW\n").unwrap();
+    q(dir.path())
+        .args(["pop"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not remove cleanly"));
+}
+
+#[test]
+fn pop_discards_backups() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a"), "a\n").unwrap();
+    fs::write(dir.path().join("b"), "b\n").unwrap();
+    q(dir.path()).args(["new", "p.diff"]).assert().success();
+    q(dir.path()).args(["add", "a", "b"]).assert().success();
+    fs::write(dir.path().join("a"), "A\n").unwrap();
+    fs::write(dir.path().join("b"), "B\n").unwrap();
+    q(dir.path())
+        .args(["refresh", "--no-timestamps"])
+        .assert()
+        .success();
+    q(dir.path()).args(["pop"]).assert().success();
+    assert!(!dir.path().join(".pc/p.diff").exists());
+    assert!(!dir.path().join(".pc/.q/p.diff").exists());
+
+    // Drop b from the patch, and let b change upstream meanwhile.
+    let patch = fs::read_to_string(dir.path().join("patches/p.diff")).unwrap();
+    let b_section = patch.match_indices("Index: ").nth(1).unwrap().0;
+    let a_only = &patch[..b_section];
+    assert!(a_only.contains("+A") && !a_only.contains("+B"));
+    fs::write(dir.path().join("patches/p.diff"), a_only).unwrap();
+    fs::write(dir.path().join("b"), "upstream\n").unwrap();
+
+    q(dir.path()).args(["push"]).assert().success();
+    q(dir.path())
+        .args(["files"])
+        .assert()
+        .success()
+        .stdout("a\n");
+    q(dir.path()).args(["pop"]).assert().success();
+    assert_eq!(fs::read_to_string(dir.path().join("a")).unwrap(), "a\n");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("b")).unwrap(),
+        "upstream\n"
+    );
+}
+
+#[test]
+fn pop_gives_restored_files_a_fresh_mtime() {
+    let dir = applied_hello_patch();
+    let hello = dir.path().join("hello.txt");
+    let old = filetime::FileTime::from_unix_time(1_000_000_000, 0);
+    // Age the backup, as a clone or a long-lived backup would be.
+    filetime::set_file_mtime(dir.path().join(".pc/change.diff/hello.txt"), old).unwrap();
+    q(dir.path()).args(["pop"]).assert().success();
+    assert_eq!(fs::read_to_string(&hello).unwrap(), "old\n");
+    let mtime = filetime::FileTime::from_last_modification_time(&fs::metadata(&hello).unwrap());
+    assert!(mtime > old, "restored file kept the backup's old mtime");
+}
+
+#[test]
+fn push_refresh_rewrites_patch_and_still_pops_cleanly() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("hello.txt"), "old\n").unwrap();
+    fs::create_dir(dir.path().join("patches")).unwrap();
+    // No Index: line, so refreshing rewrites the patch text.
+    fs::write(
+        dir.path().join("patches/change.diff"),
+        "--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-old\n+new\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("patches/series"), "change.diff\n").unwrap();
+
+    q(dir.path())
+        .args(["push", "--refresh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Refreshed patch"));
+    let patch = fs::read_to_string(dir.path().join("patches/change.diff")).unwrap();
+    assert!(patch.starts_with("Index: "));
+    let recorded = fs::read_to_string(dir.path().join(".pc/.q/change.diff/patch")).unwrap();
+    assert_eq!(recorded, patch);
+
+    fs::write(dir.path().join("hello.txt"), "NEW\n").unwrap();
+    q(dir.path())
+        .args(["pop"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not remove cleanly"));
+    fs::write(dir.path().join("hello.txt"), "new\n").unwrap();
+    q(dir.path()).args(["pop"]).assert().success();
+    assert_eq!(
+        fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
+fn pop_removes_backup_directories_of_nested_patch_names() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a"), "a\n").unwrap();
+    q(dir.path())
+        .args(["new", "sub/dir/s.diff"])
+        .assert()
+        .success();
+    q(dir.path()).args(["add", "a"]).assert().success();
+    fs::write(dir.path().join("a"), "A\n").unwrap();
+    q(dir.path()).args(["refresh"]).assert().success();
+    assert!(dir.path().join(".pc/.q/sub/dir/s.diff").exists());
+    q(dir.path()).args(["pop"]).assert().success();
+    assert!(!dir.path().join(".pc/sub").exists());
+    assert!(!dir.path().join(".pc/.q/sub").exists());
+    assert!(dir.path().join(".pc/.version").exists());
+}

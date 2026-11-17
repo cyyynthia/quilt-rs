@@ -52,6 +52,18 @@ fn hard_link_count(_path: &Path) -> io::Result<u64> {
     Ok(1)
 }
 
+/// Whether the file `metadata` describes is also reachable by another name.
+#[cfg(unix)]
+pub(crate) fn has_other_hard_links(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink() > 1
+}
+
+#[cfg(not(unix))]
+pub(crate) fn has_other_hard_links(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
 pub(crate) fn copy_preserving_times(src: &Path, dst: &Path) -> Result<()> {
     fs::copy(src, dst)?;
     if let Ok(metadata) = fs::metadata(src) {

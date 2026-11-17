@@ -328,9 +328,10 @@ pub(crate) fn cmd_pop(args: Vec<OsString>) -> Result<()> {
                 "Patch {} appears to be empty, removing",
                 state.display_patch(&patch)
             );
+            discard_patch_backups(&state, &patch)?;
         } else {
             println!("Removing patch {}", state.display_patch(&patch));
-            restore_patch_files(&state, &patch, &tracked, !quiet)?;
+            unapply_patch_files(&state, &patch, &tracked, !quiet)?;
         }
         if !quiet {
             println!();
