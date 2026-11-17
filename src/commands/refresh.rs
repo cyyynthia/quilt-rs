@@ -54,6 +54,11 @@ pub(crate) fn cmd_refresh(args: Vec<OsString>) -> Result<()> {
     let patch = applied_patch(&state, patch.as_deref())?;
     opts.strip = strip_for(&state, &patch, strip, "refresh")?;
     opts.relative = fork_name.is_some();
+    let patched = match fork_name {
+        Some(_) => Some(patched_tree(&state, &patch)?),
+        None => None,
+    };
+    opts.relative_root = patched.as_ref().map(|tree| tree.path().to_path_buf());
     let tracked = state.tracked_files(&patch)?;
     let preserved_files = files_modified_by_newer_patches(&state, &patch, &tracked)?;
     if !force && !preserved_files.is_empty() {
@@ -73,7 +78,16 @@ pub(crate) fn cmd_refresh(args: Vec<OsString>) -> Result<()> {
         }
         create_parent_dir(&dest)?;
         write_patch_text(&dest, &new_text)?;
-        seed_fork_backup(&state, &patch, &new_patch, &new_text, opts.strip.level())?;
+        let patched = patched
+            .as_ref()
+            .expect("a fork diffs against the patched tree");
+        seed_fork_backup(
+            &state,
+            patched.path(),
+            &new_patch,
+            &new_text,
+            opts.strip.level(),
+        )?;
         let before = state.patch_after(state.applied()?.last().map(String::as_str))?;
         state.insert_in_series(
             &PatchEntry {
@@ -358,22 +372,19 @@ fn report_or_strip_trailing_ws_for_files(
 }
 
 /// Back up the files of a `refresh -z` fork: each file as the old patch left
-/// it, so the fork holds only the changes made since.
+/// it (in `patched`), so the fork holds only the changes made since.
 fn seed_fork_backup(
     state: &State,
-    old_patch: &str,
+    patched: &Path,
     new_patch: &str,
     fork_text: &str,
     strip: usize,
 ) -> Result<()> {
     for file in filenames_in_text_order(fork_text, strip) {
         let backup = state.backup_dir(new_patch).join(&file);
-        let expected = expected_file(state, old_patch, &file);
-        let old_backup = state.backup_dir(old_patch).join(&file);
-        if expected.exists() {
-            copy_creating_dirs(&expected, &backup)?;
-        } else if old_backup.metadata().is_ok_and(|m| m.len() != 0) {
-            copy_creating_dirs(&old_backup, &backup)?;
+        let old = patched.join(&file);
+        if old.exists() {
+            copy_creating_dirs(&old, &backup)?;
         } else {
             create_parent_dir(&backup)?;
             File::create(backup)?;

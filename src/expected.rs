@@ -16,8 +16,12 @@ fn meta_dir(state: &State, patch: &str) -> PathBuf {
     state.pc_dir.join(".q").join(patch)
 }
 
+pub(crate) fn expected_dir(state: &State, patch: &str) -> PathBuf {
+    meta_dir(state, patch).join("expected")
+}
+
 pub(crate) fn expected_file(state: &State, patch: &str, file: &Path) -> PathBuf {
-    meta_dir(state, patch).join("expected").join(file)
+    expected_dir(state, patch).join(file)
 }
 
 /// Files the patch is expected to have deleted.

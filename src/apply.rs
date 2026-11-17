@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tempfile::{NamedTempFile, tempdir};
+use tempfile::{NamedTempFile, TempDir, tempdir};
 
 pub struct ApplyResult {
     pub clean: bool,
@@ -464,6 +464,49 @@ pub(crate) fn restore_patch_files(
     Ok(())
 }
 
+/// A scratch tree with `entry` applied to copies of its backups of
+/// `tracked`: the files as the patch file says it leaves them. `None` if the
+/// patch doesn't apply to them.
+pub(crate) fn apply_to_backups(
+    state: &State,
+    entry: &PatchEntry,
+    tracked: &[PathBuf],
+) -> Result<Option<TempDir>> {
+    let patch = &entry.name;
+    let workdir = tempdir()?;
+    populate_pop_workdir(state, patch, tracked, workdir.path())?;
+    if patch_body(&state.patch_path(patch))?.is_empty() {
+        return Ok(Some(workdir));
+    }
+    let patch_path = patch_file_for_apply(&state.patch_path(patch), entry)?;
+    let input = fs::read(patch_path.path())?;
+    let args = PatchFlags {
+        strip: strip_level(entry),
+        reverse: is_reversed(entry),
+        force: true,
+        quiet: true,
+        extra: &[],
+    }
+    .args()?;
+    let outcome = apply_in_process(workdir.path(), &input, args, None);
+    if !matches!(outcome, InProcess::Applied) {
+        if outcome.touched_files() {
+            fs::remove_dir_all(workdir.path())?;
+            fs::create_dir_all(workdir.path())?;
+            populate_pop_workdir(state, patch, tracked, workdir.path())?;
+        }
+        let status = gnu_patch(workdir.path(), patch_path.path(), entry, is_reversed(entry))?
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("failed to run patch")?;
+        if !status.success() {
+            return Ok(None);
+        }
+    }
+    Ok(Some(workdir))
+}
+
 /// Whether popping `entry` would lose no changes: the working tree matches
 /// what applying the patch to its backups produces. `use_expected_state`
 /// trusts a current recorded expected state outright (for the top patch).
@@ -489,33 +532,9 @@ pub(crate) fn patch_removes_cleanly(
     }
     let patch_path = patch_file_for_apply(&state.patch_path(patch), entry)?;
     let input = fs::read(patch_path.path())?;
-
-    let workdir = tempdir()?;
-    populate_pop_workdir(state, patch, tracked, workdir.path())?;
-    let args = PatchFlags {
-        strip: strip_level(entry),
-        reverse: is_reversed(entry),
-        force: true,
-        quiet: true,
-        extra: &[],
-    }
-    .args()?;
-    let outcome = apply_in_process(workdir.path(), &input, args, None);
-    if !matches!(outcome, InProcess::Applied) {
-        if outcome.touched_files() {
-            fs::remove_dir_all(workdir.path())?;
-            fs::create_dir_all(workdir.path())?;
-            populate_pop_workdir(state, patch, tracked, workdir.path())?;
-        }
-        let status = gnu_patch(workdir.path(), patch_path.path(), entry, is_reversed(entry))?
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("failed to run patch")?;
-        if !status.success() {
-            return Ok(false);
-        }
-    }
+    let Some(workdir) = apply_to_backups(state, entry, tracked)? else {
+        return Ok(false);
+    };
 
     let mut files: HashSet<PathBuf> = tracked.iter().cloned().collect();
     files.extend(filenames_in_text_order(

@@ -792,3 +792,132 @@ fn import_rejects_paths_without_a_file_name() {
         .failure()
         .stderr(predicate::str::contains("panicked").not());
 }
+
+/// Two patches over `file_a`..`file_c` where p2 also changes `file_b`, built
+/// with `-p ab --no-index` like a stack that keeps no `Index:` lines.
+fn shadowed_stack_without_index() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    for name in ["file_a", "file_b", "file_c"] {
+        fs::write(dir.path().join(name), format!("base {name}\n")).unwrap();
+    }
+    q(dir.path()).args(["new", "p1.diff"]).assert().success();
+    q(dir.path())
+        .args(["add", "file_a", "file_b", "file_c"])
+        .assert()
+        .success();
+    for name in ["file_a", "file_b", "file_c"] {
+        fs::write(dir.path().join(name), format!("p1 {name}\n")).unwrap();
+    }
+    q(dir.path())
+        .args(["refresh", "-p", "ab", "--no-index", "--no-timestamps"])
+        .assert()
+        .success();
+    q(dir.path()).args(["new", "p2.diff"]).assert().success();
+    q(dir.path()).args(["add", "file_b"]).assert().success();
+    fs::write(dir.path().join("file_b"), "p2 file_b\n").unwrap();
+    q(dir.path())
+        .args(["refresh", "-p", "ab", "--no-index", "--no-timestamps"])
+        .assert()
+        .success();
+    dir
+}
+
+#[test]
+fn refresh_force_without_index_lines_keeps_each_file_once() {
+    let dir = shadowed_stack_without_index();
+    fs::write(dir.path().join("file_a"), "updated p1 file_a\n").unwrap();
+    q(dir.path())
+        .args([
+            "refresh",
+            "-f",
+            "-p",
+            "ab",
+            "--no-index",
+            "--no-timestamps",
+            "p1.diff",
+        ])
+        .assert()
+        .success();
+
+    let patch = fs::read_to_string(dir.path().join("patches/p1.diff")).unwrap();
+    let files: Vec<_> = patch
+        .lines()
+        .filter_map(|line| line.strip_prefix("+++ b/"))
+        .collect();
+    assert_eq!(files, ["file_a", "file_b", "file_c"], "{patch}");
+    assert!(patch.contains("+updated p1 file_a"), "{patch}");
+    assert!(patch.contains("+p1 file_b"), "{patch}");
+    assert!(!patch.contains("+p2 file_b"), "{patch}");
+}
+
+#[test]
+fn diff_of_lower_patch_takes_shadowed_files_from_next_patch_backup() {
+    let dir = shadowed_stack_without_index();
+    // A stack pushed without q's metadata, as by GNU quilt.
+    let _ = fs::remove_dir_all(dir.path().join(".pc/.q"));
+
+    q(dir.path())
+        .args([
+            "diff",
+            "-p",
+            "ab",
+            "--no-index",
+            "--no-timestamps",
+            "-P",
+            "p1.diff",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("+p1 file_b"))
+        .stdout(predicate::str::contains("p2 file_b").not());
+    q(dir.path())
+        .args([
+            "diff",
+            "-p",
+            "ab",
+            "--no-index",
+            "--no-timestamps",
+            "--combine",
+            "-",
+            "-P",
+            "p1.diff",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("+p1 file_b"))
+        .stdout(predicate::str::contains("p2 file_b").not());
+}
+
+#[test]
+fn diff_z_ignores_expected_state_recorded_for_other_patch_text() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("file"), "base\n").unwrap();
+    q(dir.path()).args(["new", "p1.diff"]).assert().success();
+    q(dir.path()).args(["add", "file"]).assert().success();
+    fs::write(dir.path().join("file"), "p1\n").unwrap();
+    q(dir.path())
+        .args(["refresh", "--no-timestamps"])
+        .assert()
+        .success();
+    let committed = fs::read_to_string(dir.path().join("patches/p1.diff")).unwrap();
+
+    // Refresh work in progress, then put the committed patch text back, as
+    // checking out the patch file from version control does.
+    fs::write(dir.path().join("file"), "wip\n").unwrap();
+    q(dir.path())
+        .args(["refresh", "--no-timestamps"])
+        .assert()
+        .success();
+    fs::write(dir.path().join("patches/p1.diff"), &committed).unwrap();
+
+    q(dir.path())
+        .args(["diff", "-z", "--no-timestamps"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("-p1\n+wip\n"));
+    q(dir.path())
+        .args(["pop"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not remove cleanly"));
+}

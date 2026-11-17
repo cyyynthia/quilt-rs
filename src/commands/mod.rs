@@ -23,10 +23,13 @@ pub(crate) use stack::{
     cmd_delete, cmd_fold, cmd_fork, cmd_import, cmd_new, cmd_pop, cmd_push, cmd_rename,
 };
 
+use crate::apply::apply_to_backups;
+use crate::expected::{expected_dir, expected_state_is_current};
 use crate::state::State;
 use anyhow::{Context, Result, bail};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 
 pub fn applied_patch(state: &State, patch: Option<&str>) -> Result<String> {
     state.require_series()?;
@@ -83,6 +86,69 @@ fn files_modified_by_newer_patches(
         }
     }
     Ok(modified)
+}
+
+/// For each of `files` that a patch applied after `patch` changes too, the
+/// backup of the first such patch: the file as `patch` left it.
+fn next_patch_backups(
+    state: &State,
+    patch: &str,
+    files: &[PathBuf],
+) -> Result<HashMap<PathBuf, PathBuf>> {
+    let mut backups = HashMap::new();
+    if files.is_empty() {
+        return Ok(backups);
+    }
+    let files: HashSet<&PathBuf> = files.iter().collect();
+    for later in newer_applied_patches(state, patch)? {
+        for file in state.tracked_files(&later)? {
+            if files.contains(&file) && !backups.contains_key(&file) {
+                backups.insert(file.clone(), state.backup_dir(&later).join(&file));
+            }
+        }
+        if backups.len() == files.len() {
+            break;
+        }
+    }
+    Ok(backups)
+}
+
+/// `patch`'s files as its patch file leaves them, which `diff -z` and
+/// `refresh -z` compare the working tree against.
+enum PatchedTree {
+    /// The expected state recorded for the current patch text.
+    Expected(PathBuf),
+    /// The patch applied to copies of its backups.
+    Scratch(TempDir),
+}
+
+impl PatchedTree {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Expected(path) => path,
+            Self::Scratch(dir) => dir.path(),
+        }
+    }
+}
+
+fn patched_tree(state: &State, patch: &str) -> Result<PatchedTree> {
+    if expected_state_is_current(state, patch) {
+        return Ok(PatchedTree::Expected(expected_dir(state, patch)));
+    }
+    let entry = state
+        .entries()?
+        .into_iter()
+        .find(|entry| entry.name == patch)
+        .with_context(|| format!("Patch {} is not in series", state.display_patch(patch)))?;
+    let tracked = state.tracked_files(patch)?;
+    apply_to_backups(state, &entry, &tracked)?
+        .map(PatchedTree::Scratch)
+        .with_context(|| {
+            format!(
+                "Patch {} does not apply to its backup files",
+                state.display_patch(patch)
+            )
+        })
 }
 
 /// The applied patches from `first` through `last`, for `--combine`. `first`
