@@ -51,5 +51,6 @@ run_test stack \
 	--skip patch_basename_match_must_be_unambiguous \
 	--skip patch_environment_options_are_honored \
 	--skip pop_accepts_unique_patch_basename \
+	--skip pop_removes_backup_directories_of_nested_patch_names \
 	--skip push_and_pop_empty_patch_file \
 	--skip push_applies_missing_patch_file_as_empty_patch

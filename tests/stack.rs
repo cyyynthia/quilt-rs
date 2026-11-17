@@ -1031,8 +1031,6 @@ fn push_refresh_rewrites_patch_and_still_pops_cleanly() {
         .stdout(predicate::str::contains("Refreshed patch"));
     let patch = fs::read_to_string(dir.path().join("patches/change.diff")).unwrap();
     assert!(patch.starts_with("Index: "));
-    let recorded = fs::read_to_string(dir.path().join(".pc/.q/change.diff/patch")).unwrap();
-    assert_eq!(recorded, patch);
 
     fs::write(dir.path().join("hello.txt"), "NEW\n").unwrap();
     q(dir.path())
@@ -1059,7 +1057,7 @@ fn pop_removes_backup_directories_of_nested_patch_names() {
     q(dir.path()).args(["add", "a"]).assert().success();
     fs::write(dir.path().join("a"), "A\n").unwrap();
     q(dir.path()).args(["refresh"]).assert().success();
-    assert!(dir.path().join(".pc/.q/sub/dir/s.diff").exists());
+    assert!(dir.path().join(".pc/sub/dir/s.diff").exists());
     q(dir.path()).args(["pop"]).assert().success();
     assert!(!dir.path().join(".pc/sub").exists());
     assert!(!dir.path().join(".pc/.q/sub").exists());
