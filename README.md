@@ -36,12 +36,12 @@ Ryzen 9 9950X; `tools/benchmark.sh` reproduces it.
 
 | Command | q | quilt | Speedup |
 | --- | ---: | ---: | ---: |
-| `push -a` | 21.0 ms | 501.8 ms | 24x |
-| `pop -a` | 22.9 ms | 1.762 s | 77x |
-| `refresh` | 2.6 ms | 43.5 ms | 17x |
-| `push -a --refresh` | 76.3 ms | 3.815 s | 50x |
-| `pop -a --refresh` | 61.7 ms | 5.239 s | 85x |
-| `fold` | 1.7 ms | 8.1 ms | 5x |
+| `push -a` | 20.8 ms | 492.6 ms | 24x |
+| `pop -a` | 20.7 ms | 1.766 s | 85x |
+| `refresh` | 2.4 ms | 43.5 ms | 18x |
+| `push -a --refresh` | 76.4 ms | 3.869 s | 51x |
+| `pop -a --refresh` | 60.0 ms | 5.086 s | 85x |
+| `fold` | 1.9 ms | 8.3 ms | 4x |
 
 How much faster q is on your patches depends on how many patches and files
 you have and how large they are.
