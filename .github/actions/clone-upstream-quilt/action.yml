@@ -18,4 +18,4 @@ runs:
         dest="${dest/#\~/$HOME}"
         rm -rf "$dest"
         mkdir -p "$(dirname "$dest")"
-        git clone --depth 1 https://git.savannah.nongnu.org/git/quilt.git "$dest"
+        git clone --depth 1 git://git.savannah.nongnu.org/quilt.git "$dest"
