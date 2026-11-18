@@ -1,12 +1,11 @@
 use crate::color::{color_arg, escape};
 use crate::config::*;
-use crate::expected::*;
 use crate::patchfile::*;
 use crate::state::State;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local};
 use lexopt::ValueExt;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -24,7 +23,12 @@ pub struct DiffOpts {
     pub relative: bool,
     pub sort: bool,
     pub exclude: Vec<PathBuf>,
-    pub use_expected_for: Vec<PathBuf>,
+    /// For `relative`, the tree holding each file as the patch leaves it;
+    /// a missing file there was deleted by the patch.
+    pub relative_root: Option<PathBuf>,
+    /// The new side of files later patches change too, by file: the next
+    /// such patch's backup, where an empty file means the file is absent.
+    pub new_side_for: HashMap<PathBuf, PathBuf>,
     pub diff_utility: Option<String>,
     pub color: bool,
     /// Read the new side of each file from here instead of the working tree.
@@ -43,7 +47,8 @@ impl Default for DiffOpts {
             relative: false,
             sort: false,
             exclude: Vec::new(),
-            use_expected_for: Vec::new(),
+            relative_root: None,
+            new_side_for: HashMap::new(),
             diff_utility: None,
             color: false,
             new_root: None,
@@ -155,13 +160,12 @@ pub(crate) fn emit_diff<W: Write>(
         files.retain(|f| !exclude.contains(f));
     }
     let colors = opts.color.then(DiffColors::from_env);
-    let deleted_files = expected_deleted(state, patch)?;
     // Spawning `diff` per file dominates refresh time, so run them
     // concurrently and then emit the results in file order.
     let mut jobs = Vec::new();
     let mut prep_error = None;
     for file in files {
-        match prepare_diff_job(state, patch, opts, &deleted_files, file) {
+        match prepare_diff_job(state, patch, opts, file) {
             Ok(Some(job)) => jobs.push(job),
             Ok(None) => {}
             Err(err) => {
@@ -227,29 +231,32 @@ fn prepare_diff_job(
     state: &State,
     patch: &str,
     opts: &DiffOpts,
-    deleted_files: &HashSet<PathBuf>,
     file: PathBuf,
 ) -> Result<Option<DiffJob>> {
-    let expected = expected_file(state, patch, &file);
-    let expected_is_deleted = deleted_files.contains(&file);
-    let old = if opts.relative && expected.exists() {
-        expected.clone()
-    } else {
-        state.backup_dir(patch).join(&file)
+    let (old, old_empty) = match opts.relative_root.as_ref().filter(|_| opts.relative) {
+        Some(root) => {
+            let old = root.join(&file);
+            let empty = !old.exists();
+            (old, empty)
+        }
+        None => {
+            let old = state.backup_dir(patch).join(&file);
+            let empty = old.metadata()?.len() == 0;
+            (old, empty)
+        }
     };
-    let use_expected = opts.use_expected_for.iter().any(|f| f == &file);
-    let new = if use_expected && expected.exists() {
-        expected_file(state, patch, &file)
-    } else if let Some(new_root) = &opts.new_root {
-        new_root.join(&file)
+    let (new, new_missing) = if let Some(next_backup) = opts.new_side_for.get(&file) {
+        let missing = next_backup.metadata().map_or(true, |m| m.len() == 0);
+        (next_backup.clone(), missing)
     } else {
-        state.root.join(&file)
+        let new = match &opts.new_root {
+            Some(new_root) => new_root.join(&file),
+            None => state.root.join(&file),
+        };
+        let missing = !new.exists();
+        (new, missing)
     };
-    if opts.relative && expected_is_deleted && !new.exists() {
-        return Ok(None);
-    }
-    let old_empty = old.metadata()?.len() == 0;
-    if old_empty && !new.exists() {
+    if old_empty && new_missing {
         return Ok(None);
     }
     let old_arg = if old_empty {
@@ -257,7 +264,7 @@ fn prepare_diff_job(
     } else {
         old.as_path()
     };
-    let new_arg = if !new.exists() {
+    let new_arg = if new_missing {
         Path::new("/dev/null")
     } else {
         new.as_path()

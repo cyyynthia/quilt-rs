@@ -126,25 +126,83 @@ pub(crate) fn filenames_in_text_order(text: &str, strip: usize) -> Vec<PathBuf> 
 
 /// The per-file sections of a patch body that touch one of `wanted`.
 pub(crate) fn body_for_files(body: &str, strip: usize, wanted: &HashSet<PathBuf>) -> String {
-    let mut out = String::new();
-    let mut block = String::new();
-    let mut flush = |block: &mut String| {
-        if filenames_in_text_order(block, strip)
-            .iter()
-            .any(|file| wanted.contains(file))
-        {
-            out.push_str(block);
+    file_sections(body)
+        .into_iter()
+        .filter(|section| {
+            filenames_in_text_order(section, strip)
+                .iter()
+                .any(|file| wanted.contains(file))
+        })
+        .collect()
+}
+
+/// Split a patch body into one section per file. A section starts at an
+/// `Index:` or `diff` line, or at the file labels when it has neither, so
+/// patches written with `--no-index` split too. Unified hunks are skipped by
+/// their line counts, since a removed `-- x` line reads as `--- x`.
+fn file_sections(body: &str) -> Vec<&str> {
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let mut sections = Vec::new();
+    let mut start = 0;
+    let mut offset = 0;
+    // Whether the current section has named its file yet.
+    let mut has_file = false;
+    // Whether it has a git `diff` line.
+    let mut has_diff_line = false;
+    // Lines left in the current unified hunk, old and new side.
+    let (mut old_left, mut new_left) = (0usize, 0usize);
+    for (i, line) in lines.iter().enumerate() {
+        let next = lines.get(i + 1).copied().unwrap_or("");
+        if old_left > 0 || new_left > 0 {
+            match line.as_bytes().first() {
+                Some(b'-') => old_left = old_left.saturating_sub(1),
+                Some(b'+') => new_left = new_left.saturating_sub(1),
+                Some(b'\\') => {}
+                _ => {
+                    old_left = old_left.saturating_sub(1);
+                    new_left = new_left.saturating_sub(1);
+                }
+            }
+            offset += line.len();
+            continue;
         }
-        block.clear();
-    };
-    for line in body.split_inclusive('\n') {
-        if line.starts_with("Index: ") && !block.is_empty() {
-            flush(&mut block);
+        let is_diff_line = line.starts_with("diff ");
+        let starts_header = line.starts_with("Index: ") || is_diff_line;
+        let starts_labels = (line.starts_with("--- ") && next.starts_with("+++ "))
+            || (line.starts_with("*** ")
+                && !line.trim_end().ends_with(" ****")
+                && next.starts_with("--- "));
+        // A git `diff` line may head a section with no labels (a rename).
+        if (starts_header && (has_file || has_diff_line)) || (starts_labels && has_file) {
+            sections.push(&body[start..offset]);
+            start = offset;
+            has_file = false;
+            has_diff_line = false;
         }
-        block.push_str(line);
+        has_diff_line |= is_diff_line;
+        has_file |= line.starts_with("+++ ")
+            || (line.starts_with("--- ") && !line.trim_end().ends_with(" ----"));
+        if let Some((old, new)) = unified_hunk_lengths(line) {
+            (old_left, new_left) = (old, new);
+        }
+        offset += line.len();
     }
-    flush(&mut block);
-    out
+    if start < body.len() {
+        sections.push(&body[start..]);
+    }
+    sections
+}
+
+/// The old and new line counts of a unified `@@ -a,b +c,d @@` hunk header.
+fn unified_hunk_lengths(line: &str) -> Option<(usize, usize)> {
+    let mut ranges = line.strip_prefix("@@ -")?.split(' ');
+    let count = |range: &str| match range.split_once(',') {
+        Some((_, count)) => count.parse().ok(),
+        None => range.parse::<usize>().ok().map(|_| 1),
+    };
+    let old = count(ranges.next()?)?;
+    let new = count(ranges.next()?.strip_prefix('+')?)?;
+    Some((old, new))
 }
 
 /// The file name in a `---`/`+++`/`***` label, without timestamp or quotes.
@@ -275,8 +333,41 @@ pub(crate) fn is_reversed(entry: &PatchEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{body_of, filenames_in_text_order, header_of};
+    use super::{body_for_files, body_of, file_sections, filenames_in_text_order, header_of};
+    use std::collections::HashSet;
     use std::path::PathBuf;
+
+    #[test]
+    fn splits_sections_without_index_lines() {
+        let body = "--- a/one\n+++ b/one\n@@ -1 +1 @@\n--- x\n+++ y\n\
+                    --- a/two\n+++ b/two\n@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n";
+        assert_eq!(
+            file_sections(body),
+            [
+                "--- a/one\n+++ b/one\n@@ -1 +1 @@\n--- x\n+++ y\n",
+                "--- a/two\n+++ b/two\n@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n",
+            ]
+        );
+        let wanted = HashSet::from([PathBuf::from("two")]);
+        assert_eq!(
+            body_for_files(body, 1, &wanted),
+            "--- a/two\n+++ b/two\n@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n"
+        );
+    }
+
+    #[test]
+    fn keeps_index_and_git_headers_with_their_section() {
+        let body = "Index: a/one\n===\n--- a/one\n+++ b/one\n@@ -1 +1 @@\n-a\n+b\n\
+                    diff --git a/two b/two\nindex 1..2\n--- a/two\n+++ b/two\n@@ -0,0 +1 @@\n+c\n\
+                    diff --git a/x b/y\nrename from x\nrename to y\n\
+                    diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +0,0 @@\n-z\n";
+        let sections = file_sections(body);
+        assert_eq!(sections.len(), 4, "{sections:?}");
+        assert!(sections[0].starts_with("Index: a/one"));
+        assert!(sections[1].starts_with("diff --git a/two"));
+        assert!(sections[2].starts_with("diff --git a/x"));
+        assert!(sections[3].starts_with("diff --git a/z"));
+    }
 
     #[test]
     fn extracts_filenames_using_strip_level() {

@@ -1,7 +1,6 @@
 use crate::commands::*;
 use crate::config::*;
 use crate::diff::*;
-use crate::expected::*;
 use crate::patchfile::strip_arg;
 use crate::state::State;
 use anyhow::{Context, Result, bail};
@@ -46,13 +45,14 @@ pub(crate) fn cmd_diff(args: Vec<OsString>) -> Result<()> {
     let newer_files = files_modified_by_newer_patches(&state, &patch, &tracked)?;
     if let Some(combine) = combine {
         let range = applied_range(&state, &state.applied()?, &combine, &patch)?;
-        emit_combined_diff(&state, &range, &files, &opts, &newer_files)?;
+        emit_combined_diff(&state, &range, &files, &opts)?;
+    } else if opts.relative {
+        opts.exclude = newer_files.clone();
+        let patched = patched_tree(&state, &patch)?;
+        opts.relative_root = Some(patched.path().to_path_buf());
+        emit_diff(&state, &patch, &tracked, &files, &opts, io::stdout())?;
     } else {
-        if opts.relative {
-            opts.exclude = newer_files.clone();
-        } else {
-            opts.use_expected_for = newer_files.clone();
-        }
+        opts.new_side_for = next_patch_backups(&state, &patch, &newer_files)?;
         emit_diff(&state, &patch, &tracked, &files, &opts, io::stdout())?;
     }
     if !newer_files.is_empty() {
@@ -69,7 +69,6 @@ fn emit_combined_diff(
     patches: &[String],
     selected: &[PathBuf],
     opts: &DiffOpts,
-    use_expected_for: &[PathBuf],
 ) -> Result<()> {
     let Some(first) = patches.first() else {
         return Ok(());
@@ -90,20 +89,26 @@ fn emit_combined_diff(
         let selected: HashSet<_> = selected.iter().cloned().collect();
         files.retain(|file| selected.contains(file));
     }
+    let next_backups = next_patch_backups(state, last, &files)?;
     let colors = opts.color.then(DiffColors::from_env);
     let mut stdout = io::stdout();
     for file in files {
         let old = state.backup_dir(first).join(&file);
-        let new = if use_expected_for.iter().any(|candidate| candidate == &file) {
-            expected_file(state, last, &file)
-        } else {
-            state.root.join(&file)
+        let (new, new_missing) = match next_backups.get(&file) {
+            Some(backup) => (
+                backup.clone(),
+                backup.metadata().map_or(true, |m| m.len() == 0),
+            ),
+            None => {
+                let new = state.root.join(&file);
+                let missing = !new.exists();
+                (new, missing)
+            }
         };
         let old_empty = old
             .metadata()
             .map(|metadata| metadata.len() == 0)
             .unwrap_or(false);
-        let new_missing = !new.exists();
         let old_arg = if old.exists() {
             old.as_path()
         } else {
