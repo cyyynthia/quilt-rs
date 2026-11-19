@@ -26,3 +26,8 @@ walkdir = "2.5.0"
 [dev-dependencies]
 assert_cmd = "2.2.1"
 predicates = "3.1.4"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = "fat"
