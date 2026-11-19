@@ -195,7 +195,7 @@ fn grouped_apply_file_target(
         || patch.old_file_mode.is_some()
         || patch.new_file_mode.is_some()
         || patch_changes_symlink(patch, options.reverse)
-        || has_deletion_timestamp(patch, options.reverse)
+        || has_deletion_timestamp(patch, options)
         || is_creation_only_patch(patch)
         || empties_file(patch)
     {
@@ -352,8 +352,8 @@ fn apply_file_patch(
     canonical_root: &Path,
 ) -> Result<FileReport> {
     let creates_file = source_path(patch, options.reverse).is_none();
-    let deletes_file = target_path(patch, options.reverse).is_none()
-        || has_deletion_timestamp(patch, options.reverse);
+    let deletes_file =
+        target_path(patch, options.reverse).is_none() || has_deletion_timestamp(patch, options);
     let full_path = root.join(&target);
 
     if path_parent_is_invalid(canonical_root, &target)? {
