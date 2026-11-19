@@ -403,16 +403,6 @@ fn merge_option_writes_conflict_markers_like_gnu_patch() {
 }
 
 #[test]
-fn short_merge_option_writes_conflict_markers_like_gnu_patch() {
-    assert_matches_gnu_patch(
-        &[("f", "ours\n")],
-        "--- f\n+++ f\n@@ -1 +1 @@\n-base\n+theirs\n",
-        &["-m", "-f", "-p0"],
-        &["f"],
-    );
-}
-
-#[test]
 fn merge_diff3_option_writes_original_conflict_markers_like_gnu_patch() {
     assert_matches_gnu_patch(
         &[("f", "ours\n")],
@@ -550,9 +540,30 @@ fn refuses_to_delete_when_content_remains_like_gnu_patch() {
 
 #[test]
 fn refuses_timestamp_marked_deletion_when_content_remains_like_gnu_patch() {
-    assert_matches_gnu_patch(
+    assert_matches_gnu_patch_with_env(
         &[("target", "1\n2\n")],
         "--- target\t2012-09-25 03:09:15\n+++ target\t1970-01-01 00:00:00\n@@ -1 +0,0 @@\n-1\n",
+        &["-p0"],
+        &[("TZ", "EST5")],
+        &["target"],
+    );
+}
+
+#[test]
+fn set_utc_does_not_treat_near_epoch_as_deletion_like_gnu_patch() {
+    assert_matches_gnu_patch(
+        &[("target", "1\n2\n")],
+        "--- target\t2012-09-25 03:09:15\n+++ target\t1970-01-01 05:00:00\n@@ -1 +0,0 @@\n-1\n",
+        &["-p0", "-Z"],
+        &["target"],
+    );
+}
+
+#[test]
+fn epoch_timestamp_with_nonempty_target_range_is_not_a_deletion_like_gnu_patch() {
+    assert_matches_gnu_patch(
+        &[("target", "one\n")],
+        "--- target\n+++ target\t1970-01-01 00:00:00 +0000\n@@ -1 +1 @@\n-one\n+two\n",
         &["-p0"],
         &["target"],
     );

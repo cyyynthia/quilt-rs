@@ -43,11 +43,31 @@ fn target_label(patch: &FilePatch, reverse: bool) -> Option<&str> {
     }
 }
 
-/// GNU diff marks a deleted file with an epoch timestamp on the new side.
-pub(crate) fn has_deletion_timestamp(patch: &FilePatch, reverse: bool) -> bool {
-    target_label(patch, reverse)
-        .and_then(|label| parse_header_timestamp(label, TimestampMode::Local))
-        .is_some_and(|timestamp| timestamp.seconds() == 0)
+/// GNU diff marks a deleted file with an empty target and an epoch timestamp.
+pub(crate) fn has_deletion_timestamp(patch: &FilePatch, options: &ApplyOptions) -> bool {
+    let target_starts_at_zero = patch.hunks.first().is_some_and(|hunk| {
+        if options.reverse {
+            hunk.old_start == 0
+        } else {
+            hunk.new_start == 0
+        }
+    });
+    if !target_starts_at_zero {
+        return false;
+    }
+
+    let mode = TimestampMode::from_options(options);
+    let timestamp = target_label(patch, options.reverse)
+        .and_then(|label| parse_header_timestamp(label, mode.unwrap_or(TimestampMode::Local)));
+    timestamp.is_some_and(|timestamp| {
+        if mode.is_some() {
+            timestamp.seconds() == 0
+        } else {
+            // GNU patch allows for an epoch written in a different local timezone.
+            let time = (timestamp.seconds(), timestamp.nanoseconds());
+            time > (-25 * 3600, 0) && time < (26 * 3600, 0)
+        }
+    })
 }
 
 pub(crate) fn source_timestamp(
@@ -254,7 +274,10 @@ mod tests {
             "--- a/deleted\n+++ b/deleted\t1970-01-01 01:00:00.000000000 +0100\n@@ -1 +0,0 @@\n-data\n",
         )
         .unwrap();
-        assert!(has_deletion_timestamp(&patch.files[0], false));
+        assert!(has_deletion_timestamp(
+            &patch.files[0],
+            &ApplyOptions::default()
+        ));
     }
 
     #[test]
