@@ -31,6 +31,34 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+  p2-tests:
+    name: p2 tests against GNU patch
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup CI
+        uses: ./.github/actions/setup-ci
+        with: { apt-packages: "build-essential ed" }
+
+      - name: Build GNU patch 2.8
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            --output patch-2.8.tar.xz https://ftp.gnu.org/gnu/patch/patch-2.8.tar.xz
+          tar -xf patch-2.8.tar.xz
+          cd patch-2.8
+          ./configure --quiet
+          make -s -j"$(nproc)"
+
+      - name: Run p2 tests
+        run: |
+          P2_REFERENCE_PATCH="$RUNNER_TEMP/patch-2.8/src/patch" \
+            cargo test --locked --manifest-path p2/Cargo.toml
+
   q-tests-against-upstream-quilt:
     name: q tests against upstream quilt
     runs-on: ubuntu-latest
